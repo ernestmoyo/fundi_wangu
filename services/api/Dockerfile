@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ COPY src ./src
 RUN npx tsc
 
 # Stage 2: Production
-FROM node:20-alpine AS runner
+FROM node:25-alpine AS runner
 
 # Install wget for health checks
 RUN apk add --no-cache wget
