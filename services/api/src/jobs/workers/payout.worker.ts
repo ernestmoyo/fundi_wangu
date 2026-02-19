@@ -21,8 +21,12 @@ const connection = {
 
 /**
  * Payout processing worker.
- * Handles B2C mobile money transfers from platform to Fundi via Selcom.
- * Atomic: debit wallet → initiate transfer → update status.
+ * Handles B2C mobile money transfers from platform to Fundi via Selcom Wallet Cashin.
+ *
+ * Uses the CASHIN utilitycode which auto-routes to the correct mobile network
+ * (Vodacom M-Pesa, Tigo Pesa, Airtel Money, Halotel, TTCL) based on MNP lookup.
+ *
+ * Flow: lock payout row → mark processing → Selcom Cashin → update status
  */
 export const payoutWorker = new Worker<PayoutJobData>(
   'payouts',
@@ -55,13 +59,22 @@ export const payoutWorker = new Worker<PayoutJobData>(
 
       await client.query('COMMIT');
 
-      // Initiate B2C transfer via Selcom
-      const selcomResponse = await selcomClient.initiateB2C({
-        orderId: payoutId,
+      // Format phone for Selcom (255XXXXXXXXX)
+      const msisdn = formatPayoutMsisdn(payoutNumber);
+      const transId = `FW-PO-${payoutId.slice(0, 8)}-${Date.now()}`;
+
+      // Initiate B2C transfer via Selcom Wallet Cashin
+      const cashinResult = await selcomClient.initiateWalletCashin({
+        transId,
         amount: amountTzs,
-        receiverPhone: payoutNumber,
-        receiverName: 'Fundi',
+        receiverPhone: msisdn,
       });
+
+      if (cashinResult.resultcode !== '000') {
+        throw new Error(`Selcom Cashin failed: ${cashinResult.message}`);
+      }
+
+      const gatewayRef = cashinResult.data?.[0]?.reference ?? transId;
 
       // Update payout with gateway reference and mark as completed
       await query(
@@ -70,7 +83,7 @@ export const payoutWorker = new Worker<PayoutJobData>(
              gateway_reference = $1,
              processed_at = NOW()
          WHERE id = $2`,
-        [selcomResponse.reference, payoutId],
+        [String(gatewayRef), payoutId],
       );
 
       // Notify Fundi of successful payout
@@ -90,7 +103,7 @@ export const payoutWorker = new Worker<PayoutJobData>(
         payoutId,
         fundiId,
         amountTzs,
-        gatewayRef: selcomResponse.reference,
+        gatewayRef,
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -137,6 +150,15 @@ export const payoutWorker = new Worker<PayoutJobData>(
     concurrency: 3, // Limit concurrent payouts for safety
   },
 );
+
+/** Format phone number to Selcom MSISDN format (255XXXXXXXXX). */
+function formatPayoutMsisdn(phone: string): string {
+  const cleaned = phone.replace(/\D/g, '');
+  if (cleaned.startsWith('255') && cleaned.length === 12) return cleaned;
+  if (cleaned.startsWith('0') && cleaned.length === 10) return `255${cleaned.slice(1)}`;
+  if (cleaned.length === 9) return `255${cleaned}`;
+  return cleaned;
+}
 
 payoutWorker.on('failed', (job, err) => {
   logger.error({

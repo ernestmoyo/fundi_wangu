@@ -1,4 +1,5 @@
 import { query, getClient } from '../db/pool.js';
+import { config } from '../config/index.js';
 import { AppError } from '../middleware/error-handler.js';
 import { logger } from '../lib/logger.js';
 import { selcomClient } from '../integrations/selcom/selcom.client.js';
@@ -14,8 +15,12 @@ class PaymentService {
 
   /**
    * Initiate a mobile money payment for a job.
-   * Creates a payment_transaction record and triggers USSD push via Selcom.
-   * Uses idempotency key to prevent double charges.
+   *
+   * Two-step Selcom Checkout flow:
+   *   1. Create a checkout order (registers the payment intent)
+   *   2. Trigger USSD push to customer's phone (wallet-payment)
+   *
+   * The customer confirms on their phone, then Selcom sends a webhook callback.
    */
   async initiatePayment(
     userId: string,
@@ -66,7 +71,6 @@ class PaymentService {
           'PAYMENT_ALREADY_COMPLETED',
         );
       }
-      // Return the existing in-progress payment
       return existing;
     }
 
@@ -99,21 +103,46 @@ class PaymentService {
 
     const transaction = txResult.rows[0]!;
 
-    // Initiate USSD push via Selcom
+    // Format phone number for Selcom (must start with 255)
+    const msisdn = this.formatMsisdn(phoneNumber);
+    const webhookUrl = `${config.API_BASE_URL}/api/v1/webhooks/selcom`;
+
     try {
-      const selcomResponse = await selcomClient.initiateC2B({
+      // Step 1: Create checkout order with Selcom
+      const createResult = await selcomClient.createCheckoutOrder({
         orderId: transaction.id,
         amount: fees.grossAmountTzs,
-        buyerPhone: phoneNumber,
+        buyerPhone: msisdn,
         buyerName: 'Fundi Wangu Customer',
+        webhookUrl,
+        remarks: `Job #${jobId.slice(0, 8)}`,
       });
 
-      // Update with gateway reference
+      if (createResult.resultcode !== '000') {
+        throw new Error(`Selcom order creation failed: ${createResult.message}`);
+      }
+
+      // Step 2: Trigger USSD push to customer phone
+      const transId = `FW-${transaction.id.slice(0, 12)}-${Date.now()}`;
+      const payResult = await selcomClient.processWalletPayment({
+        orderId: transaction.id,
+        transId,
+        msisdn,
+      });
+
+      if (payResult.resultcode !== '000') {
+        throw new Error(`Selcom USSD push failed: ${payResult.message}`);
+      }
+
+      // Extract gateway reference from response
+      const gatewayRef = payResult.data?.[0]?.reference ?? transId;
+
+      // Update transaction with gateway reference
       await query(
         `UPDATE payment_transactions
          SET gateway_reference = $1, gateway_name = 'selcom', status = 'processing'
          WHERE id = $2`,
-        [selcomResponse.reference, transaction.id],
+        [String(gatewayRef), transaction.id],
       );
 
       logger.info({
@@ -122,7 +151,7 @@ class PaymentService {
         jobId,
         amount: fees.grossAmountTzs,
         method: paymentMethod,
-        gatewayRef: selcomResponse.reference,
+        gatewayRef,
       });
     } catch (err) {
       // Mark as failed if gateway rejects immediately
@@ -149,18 +178,27 @@ class PaymentService {
   /**
    * Process Selcom payment webhook.
    * Validates signature, updates transaction status, and triggers escrow hold.
+   *
+   * Selcom sends webhooks with checkout order result data including:
+   * - order_id: our transaction ID
+   * - resultcode: "000" for success
+   * - payment_status: "COMPLETED", "FAILED", "PENDING"
    */
-  async processWebhook(rawBody: string, signature: string, payload: {
+  async processSelcomWebhook(rawBody: string, signature: string, payload: {
     order_id: string;
-    reference: string;
-    result_code: string;
-    status: string;
-    message: string;
+    transid?: string;
+    reference?: string;
+    result: string;
+    resultcode: string;
+    payment_status: string;
+    amount?: number;
+    msisdn?: string;
+    channel?: string;
   }): Promise<void> {
     // Verify webhook signature
     const isValid = selcomClient.verifyWebhookSignature(rawBody, signature);
     if (!isValid) {
-      logger.warn({ event: 'webhook.invalid_signature', reference: payload.reference });
+      logger.warn({ event: 'webhook.invalid_signature', orderId: payload.order_id });
       throw new AppError(401, 'Invalid webhook signature.', 'Sahihi ya webhook si sahihi.', 'INVALID_SIGNATURE');
     }
 
@@ -172,7 +210,7 @@ class PaymentService {
 
     if (!transaction) {
       logger.warn({ event: 'webhook.transaction_not_found', orderId: payload.order_id });
-      return; // Silently ignore unknown transactions
+      return;
     }
 
     // Prevent duplicate processing
@@ -185,15 +223,23 @@ class PaymentService {
     try {
       await client.query('BEGIN');
 
-      if (payload.result_code === '0' || payload.status === 'SUCCESS') {
+      const isSuccess = payload.resultcode === '000'
+        || payload.payment_status === 'COMPLETED'
+        || payload.result === 'SUCCESS';
+
+      if (isSuccess) {
         // Payment successful — move to escrow
         await client.query(
           `UPDATE payment_transactions
            SET status = 'held_escrow',
-               gateway_reference = $1,
+               gateway_reference = COALESCE($1, gateway_reference),
                gateway_raw_response = $2
            WHERE id = $3`,
-          [payload.reference, JSON.stringify(payload), transaction.id],
+          [
+            payload.reference ?? payload.transid ?? null,
+            JSON.stringify(payload),
+            transaction.id,
+          ],
         );
 
         // Update job with payment confirmation
@@ -208,6 +254,23 @@ class PaymentService {
           jobId: transaction.job_id,
           amount: transaction.amount_tzs,
         });
+
+        // Notify customer that payment was received
+        const jobResult = await client.query<Job>(
+          'SELECT * FROM jobs WHERE id = $1',
+          [transaction.job_id],
+        );
+        const job = jobResult.rows[0];
+
+        if (job) {
+          await enqueueNotification({
+            userId: job.customer_id,
+            templateKey: 'PAYMENT_RECEIVED',
+            variables: { amount: String(transaction.amount_tzs) },
+            channels: ['push'],
+            priority: 'normal',
+          });
+        }
       } else {
         // Payment failed
         await client.query(
@@ -217,14 +280,19 @@ class PaymentService {
                gateway_raw_response = $2,
                retry_count = retry_count + 1
            WHERE id = $3`,
-          [payload.message, JSON.stringify(payload), transaction.id],
+          [
+            payload.result ?? payload.payment_status ?? 'Unknown failure',
+            JSON.stringify(payload),
+            transaction.id,
+          ],
         );
 
         logger.warn({
           event: 'payment.failed',
           transactionId: transaction.id,
           jobId: transaction.job_id,
-          reason: payload.message,
+          reason: payload.result,
+          resultcode: payload.resultcode,
         });
       }
 
@@ -466,6 +534,22 @@ class PaymentService {
     }
 
     return result.rows[0];
+  }
+
+  // ──────────────────────────────────────────────
+  // Helpers
+  // ──────────────────────────────────────────────
+
+  /**
+   * Format phone number to Selcom MSISDN format (255XXXXXXXXX).
+   * Accepts: +255..., 0..., 255...
+   */
+  private formatMsisdn(phone: string): string {
+    const cleaned = phone.replace(/\D/g, '');
+    if (cleaned.startsWith('255') && cleaned.length === 12) return cleaned;
+    if (cleaned.startsWith('0') && cleaned.length === 10) return `255${cleaned.slice(1)}`;
+    if (cleaned.length === 9) return `255${cleaned}`;
+    return cleaned;
   }
 }
 
