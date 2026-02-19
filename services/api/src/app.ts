@@ -37,8 +37,15 @@ app.use(
   }),
 );
 
-// Body parsing
-app.use(express.json({ limit: '5mb' }));
+// Body parsing — preserve raw body for webhook signature verification
+app.use(
+  express.json({
+    limit: '5mb',
+    verify: (req, _res, buf) => {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+    },
+  }),
+);
 app.use(express.urlencoded({ extended: true }));
 
 // Rate limiting

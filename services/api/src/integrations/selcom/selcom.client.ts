@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { config } from '../../config/index.js';
 import { logger } from '../../lib/logger.js';
 
@@ -97,8 +98,7 @@ class SelcomClient {
       return config.NODE_ENV === 'development';
     }
 
-    const expected = require('crypto')
-      .createHmac('sha256', config.SELCOM_WEBHOOK_SECRET)
+    const expected = createHmac('sha256', config.SELCOM_WEBHOOK_SECRET)
       .update(rawBody)
       .digest('hex');
 
