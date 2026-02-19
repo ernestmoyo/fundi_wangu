@@ -119,7 +119,7 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npm run build --workspace=@fundi-wangu/web
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: web-build
           path: apps/web/.next
@@ -137,7 +137,7 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npm run build --workspace=@fundi-wangu/admin
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: admin-build
           path: apps/admin/.next
