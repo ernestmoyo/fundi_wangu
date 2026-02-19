@@ -1,0 +1,10 @@
+{
+  "name": "@fundi-wangu/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "echo 'Mobile app — Phase 3'",
+    "build": "echo 'Mobile app — Phase 3'",
+    "typecheck": "echo 'Mobile app — Phase 3'"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@fundi-wangu/admin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "echo 'Admin dashboard — Phase 3'",
+    "build": "echo 'Admin dashboard — Phase 3'",
+    "typecheck": "echo 'Admin dashboard — Phase 3'"
+  }
+}

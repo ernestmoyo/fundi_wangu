@@ -1,0 +1,10 @@
+{
+  "name": "@fundi-wangu/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "echo 'Web app — Phase 3'",
+    "build": "echo 'Web app — Phase 3'",
+    "typecheck": "echo 'Web app — Phase 3'"
+  }
+}
