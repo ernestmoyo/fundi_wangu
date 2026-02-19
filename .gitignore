@@ -19,6 +19,8 @@ out/
 .env.development.local
 .env.test.local
 .env.production.local
+.env.production
+infrastructure/.env.production
 
 # Testing
 coverage/
@@ -54,6 +56,12 @@ yarn-error.log*
 
 # Docker
 docker-compose.override.yml
+
+# SSL certificates
+infrastructure/certbot/
+
+# Database backups
+infrastructure/backups/
 
 # Misc
 *.log

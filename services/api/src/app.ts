@@ -7,6 +7,7 @@ import { logger } from './lib/logger.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { rateLimiter } from './middleware/rate-limiter.js';
 import { router } from './routes/index.js';
+import { healthRouter } from './routes/health.js';
 
 const app = express();
 
@@ -32,7 +33,7 @@ app.use(
   pinoHttp({
     logger,
     autoLogging: {
-      ignore: (req) => req.url === '/api/v1/health',
+      ignore: (req) => req.url === '/health' || req.url?.startsWith('/health/') || req.url === '/api/v1/health',
     },
   }),
 );
@@ -50,6 +51,9 @@ app.use(express.urlencoded({ extended: true }));
 
 // Rate limiting
 app.use(rateLimiter);
+
+// Root-level health check (used by Docker/load balancers)
+app.use('/health', healthRouter);
 
 // API routes
 app.use('/api/v1', router);
